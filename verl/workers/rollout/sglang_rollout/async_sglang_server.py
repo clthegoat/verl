@@ -35,9 +35,11 @@ from sglang.srt.entrypoints.http_server import (
 from sglang.srt.managers.io_struct import (
     ContinueGenerationReqInput,
     GenerateReqInput,
+    LoadLoRAAdapterFromTensorsReqInput,
     PauseGenerationReqInput,
     ReleaseMemoryOccupationReqInput,
     ResumeMemoryOccupationReqInput,
+    UnloadLoRAAdapterReqInput,
 )
 from sglang.srt.managers.tokenizer_manager import ServerStatus
 
@@ -48,6 +50,7 @@ from verl.utils.profiler import DistProfiler, build_sglang_profiler_args
 from verl.workers.config import HFModelConfig, RolloutConfig
 from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
 from verl.workers.rollout.sglang_rollout.sglang_rollout import _set_envs_and_config
+from verl.workers.rollout.sglang_rollout.utils import SGLANG_LORA_NAME
 from verl.workers.rollout.utils import get_max_position_embeddings, run_uvicorn
 
 logger = logging.getLogger(__file__)
@@ -204,6 +207,26 @@ class SGLangHttpServer:
             **engine_kwargs,
         }
 
+        # update lora-related args
+        if self.model_config.lora_rank > 0:
+            # Convert verl's target_modules to sglang format:
+            # verl uses "all-linear" (PEFT convention) or a list of HF module names
+            # sglang expects ["all"] or a list from SUPPORTED_LORA_TARGET_MODULES
+            target_modules = self.model_config.target_modules
+            if target_modules is None or target_modules == "all-linear":
+                sglang_target_modules = ["all"]
+            elif isinstance(target_modules, str):
+                sglang_target_modules = [target_modules]
+            else:
+                sglang_target_modules = list(target_modules)
+            args.update(
+                {
+                    "enable_lora": True,
+                    "max_lora_rank": self.model_config.lora_rank,
+                    "lora_target_modules": sglang_target_modules,
+                }
+            )
+
         # Only set dist_init_addr for multi-node; for single-node, let SGLang
         # handle port selection internally via nccl_port to avoid conflicts.
         if self.nnodes > 1:
@@ -228,7 +251,9 @@ class SGLangHttpServer:
 
         # enable_weights_cpu_backup is supported in sglang>=0.5.3
         if "enable_weights_cpu_backup" in [f.name for f in dataclasses.fields(ServerArgs)]:
-            enable_weights_cpu_backup = True if self.rollout_mode == RolloutMode.COLOCATED else False
+            enable_weights_cpu_backup = (
+                True if self.rollout_mode == RolloutMode.COLOCATED or self.model_config.lora_rank > 0 else False
+            )
             args["enable_weights_cpu_backup"] = enable_weights_cpu_backup
 
         if self.config.enable_rollout_routing_replay:
@@ -335,7 +360,7 @@ class SGLangHttpServer:
     ) -> TokenOutput:
         """Generate sequence with token-in-token-out."""
         # TODO(@wuxibin): switch to `/generate` http endpoint once multi-modal support ready.
-        max_possible_tokens = self.config.max_model_len - len(prompt_ids)
+        max_possible_tokens = self.config.max_model_len - len(prompt_ids) - 1
 
         if max_possible_tokens < 0:
             raise ValueError(
@@ -375,6 +400,10 @@ class SGLangHttpServer:
 
         generate_request = GenerateReqInput(**request)
 
+        # Add lora request
+        if self.model_config.lora_rank > 0:
+            generate_request.lora_path = SGLANG_LORA_NAME
+
         output = await self.tokenizer_manager.generate_request(generate_request, None).__anext__()
         finish_reason = output["meta_info"]["finish_reason"]
         finish_reason = finish_reason["type"] if finish_reason else None
@@ -412,6 +441,48 @@ class SGLangHttpServer:
             stop_reason=finish_reason,
             extra_info={"global_steps": self.global_steps},
         )
+
+    async def load_lora_from_tensors(
+        self,
+        lora_name: str,
+        config_dict: dict,
+        tensor_dict: dict[str, torch.Tensor],
+    ):
+        """Load LoRA adapter from tensor dict via direct tokenizer_manager call (bypasses HTTP).
+
+        Uses standard pickle (not ForkingPickler) for serialization to avoid shared memory
+        authentication issues across process boundaries. SGLang's SafeUnpickler is compatible
+        with standard pickle output.
+        """
+        import io
+        import pickle
+
+        import pybase64
+
+        logger.info(f"load_lora_from_tensors: serializing {len(tensor_dict)} tensors...")
+        buf = io.BytesIO()
+        pickle.Pickler(buf).dump(tensor_dict)
+        serialized_tensors = pybase64.b64encode(buf.getvalue()).decode("utf-8")
+        logger.info(f"load_lora_from_tensors: serialized to {len(serialized_tensors)} chars, sending to scheduler...")
+
+        req = LoadLoRAAdapterFromTensorsReqInput(
+            lora_name=lora_name,
+            config_dict=config_dict,
+            serialized_tensors=serialized_tensors,
+        )
+        result = await self.tokenizer_manager.load_lora_adapter_from_tensors(req, None)
+        if not result.success:
+            raise RuntimeError(f"Failed to load LoRA adapter: {result.error_message}")
+        logger.info(f"load_lora_from_tensors succeeded for {lora_name}")
+        return result
+
+    async def unload_lora(self, lora_name: str):
+        """Unload LoRA adapter via direct tokenizer_manager call (bypasses HTTP)."""
+        req = UnloadLoRAAdapterReqInput(lora_name=lora_name)
+        result = await self.tokenizer_manager.unload_lora_adapter(req, None)
+        if not result.success:
+            raise RuntimeError(f"Failed to unload LoRA adapter: {result.error_message}")
+        return result
 
     async def set_global_steps(self, global_steps: int):
         """Set the global steps of the model weights."""

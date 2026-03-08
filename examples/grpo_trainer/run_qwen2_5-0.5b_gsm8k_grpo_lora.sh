@@ -1,6 +1,6 @@
 set -x
 
-MODEL_PATH=/home/lechen/hf_models/Qwen2.5-3B-Instruct
+MODEL_PATH=/home/lechen/hf_models/Qwen2.5-0.5B-Instruct
 BASE_DIR=/home/lechen/neckarium/verl
 
 python3 -m verl.trainer.main_ppo \
@@ -41,7 +41,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.critic_warmup=0 \
     trainer.logger='["console","wandb"]' \
     trainer.project_name='verl_grpo_example_gsm8k' \
-    trainer.experiment_name='qwen2.5_3b_grpo_lora_vllm' \
+    trainer.experiment_name='qwen2.5_3b_grpo_lora' \
     trainer.n_gpus_per_node=2 \
     trainer.nnodes=1 \
     trainer.save_freq=200 \

@@ -1,6 +1,6 @@
 set -x
 
-MODEL_PATH=/home/lechen/hf_models/Qwen2.5-3B-Instruct
+MODEL_PATH=/home/lechen/hf_models/Qwen2.5-0.5B-Instruct
 BASE_DIR=/home/lechen/neckarium/verl
 
 python3 -m verl.trainer.main_ppo \
@@ -30,7 +30,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=40 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
-    actor_rollout_ref.rollout.name=vllm \
+    actor_rollout_ref.rollout.name=sglang \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.n=5 \
     actor_rollout_ref.rollout.load_format=auto \
@@ -41,14 +41,9 @@ python3 -m verl.trainer.main_ppo \
     trainer.critic_warmup=0 \
     trainer.logger='["console","wandb"]' \
     trainer.project_name='verl_grpo_example_gsm8k' \
-    trainer.experiment_name='qwen2.5_3b_grpo_lora_vllm' \
+    trainer.experiment_name='qwen2.5_0.5b_grpo_lora_sglang' \
     trainer.n_gpus_per_node=2 \
     trainer.nnodes=1 \
     trainer.save_freq=200 \
     trainer.test_freq=5 \
     trainer.total_epochs=15 $@
-
-    # actor_rollout_ref.actor.ppo_mini_batch_size=256 \
-    # data.train_batch_size=1024 \
-    # trainer.n_gpus_per_node=8 \
-    # actor_rollout_ref.model.use_shm=True \

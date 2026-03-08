@@ -18,7 +18,8 @@ Preprocess the GSM8k dataset to parquet format
 import argparse
 import os
 import re
-
+import filelock
+filelock.FileLock = filelock.SoftFileLock
 import datasets
 
 from verl.utils.hdfs_io import copy, makedirs
